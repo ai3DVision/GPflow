@@ -5,6 +5,11 @@ import numpy as np
 from matplotlib import pyplot as plt
 import cProfile
 import csv
+from munkres import Munkres
+from IPython import embed
+
+optimizationLoops = 50
+tol = 1e-10
 
 def readCsvFile( fileName ):
     reader = csv.reader(open(fileName,'r') )
@@ -62,46 +67,79 @@ def printModelParameters( model ):
     print "Kernel variance ", model.kern.variance, "\n"
     print "Kernel lengthscale ", model.kern.lengthscales, "\n"
 
-def plotPredictions( model, color ):
-    xtest = readCsvFile( 'test_inputs' )
+def plotPredictions( ax, model, color, label ):
+    xtest = np.sort( readCsvFile( 'test_inputs' ) )
     predMean, predVar = model.predict_y(xtest)
-    plt.plot( xtest, predMean, color )
-    plt.plot( xtest, predMean + 2.*np.sqrt(predVar),color )
-    plt.plot( xtest, predMean - 2.*np.sqrt(predVar), color )
+    ax.plot( xtest, predMean, color, label=label )
+    ax.plot( xtest, predMean + 2.*np.sqrt(predVar),color )
+    ax.plot( xtest, predMean - 2.*np.sqrt(predVar), color )
 
 def trainSparseModel(xtrain,ytrain,exact_model,isFITC):
     sparse_model = getSparseModel(xtrain,ytrain,isFITC)
-    sparse_model.likelihood.variance._array = exact_model.likelihood.variance._array
-    sparse_model.kern.lengthscales._array = exact_model.kern.lengthscales._array
-    sparse_model.kern.variance._array = exact_model.kern.variance._array
-
-    sparse_model.optimize(max_iters = 200000  )
+    sparse_model.likelihood.variance._array = exact_model.likelihood.variance._array.copy()
+    sparse_model.kern.lengthscales._array = exact_model.kern.lengthscales._array.copy()
+    sparse_model.kern.variance._array = exact_model.kern.variance._array.copy()
+    for x in range(optimizationLoops):
+       print x
+       sparse_model.optimize( display=False, max_iters = 1000 , tol=1e-10 )
+       print sparse_model.compute_log_likelihood()
     return sparse_model    
 
-def plotComparisonFigure(xtrain, sparse_model,exact_model, figure_number_predictions, figure_number_inducing_points, title ):
-    plt.figure(figure_number_predictions)
-    plotPredictions( exact_model, 'go' )
-    plotPredictions( sparse_model, 'bo' )
-    plt.plot( xtrain, np.ones( xtrain.shape ), 'ko' )
-    plt.plot( sparse_model.Z._array , -1.*np.ones( xtrain.shape ), 'ko' )
-    plt.title(title)
-    plt.figure(figure_number_inducing_points)
-    plt.plot( xtrain, sparse_model.Z._array, 'bo' )
-    plt.xlabel('Initial inducing point positions')
-    plt.ylabel('Final inducing point positions')
-    plt.title(title)
+def plotComparisonFigure(xtrain, sparse_model,exact_model, ax_predictions, ax_inducing_points, title, reassignInducing=False ):
+    plotPredictions( ax_predictions, exact_model, 'g', label='Exact model' )
+    plotPredictions( ax_predictions, sparse_model, 'b', label=title )
+    ax_predictions.legend()
+    #plt.plot( xtrain, np.ones( xtrain.shape ), 'ro' )
+    ax_predictions.plot( sparse_model.Z._array , -1.*np.ones( xtrain.shape ), 'ko' )
+    if not(reassignInducing):
+        ax_inducing_points.plot( xtrain, sparse_model.Z._array, 'bo' )
+    else:
+        ax_inducing_points.plot( xtrain, reassignInducingPoints( xtrain, sparse_model.Z._array) , 'bo' )
+    xs= np.linspace( ax_inducing_points.get_xlim()[0], ax_inducing_points.get_xlim()[1], 200 )
+    ax_inducing_points.plot( xs, xs, 'g' )
+    ax_inducing_points.set_xlabel('Optimal inducing point position')
+    ax_inducing_points.set_ylabel('Learnt inducing point position')
+    
+def trainVFEwithFITC(xtrain,ytrain,FITCmodel):
+    vfeModel = GPflow.sgpr.SGPR( xtrain, ytrain, kern=getKernel(),  Z=FITCmodel.Z._array.copy() )
+    vfeModel.likelihood.variance._array = FITCmodel.likelihood.variance._array.copy()
+    vfeModel.kern.lengthscales._array = FITCmodel.kern.lengthscales._array.copy()
+    vfeModel.kern.variance._array = FITCmodel.kern.variance._array.copy()
+    for x in range(optimizationLoops):
+       print x
+       vfeModel.optimize( display=False, max_iters = 1000 , tol=1e-10 )    
+       print vfeModel.compute_log_likelihood()
+
+    return vfeModel
+
+def reassignInducingPoints( xtrain, inducingPoints ):
+    f_xtrain = xtrain.flatten()
+    f_inducingPoints = inducingPoints.flatten()
+    
+    differenceMatrix = (f_xtrain[None,:] - f_inducingPoints[:,None])
+    absDifferenceMatrix = np.abs( differenceMatrix ) 
+    
+    #Find optimal assignment using Hungarian algorithm.
+    inds = Munkres().compute( absDifferenceMatrix )
+    #embed()
+    
+    reassignedInducingPoints = f_inducingPoints[inds]
+    return reassignedInducingPoints
+    
 
 def snelsonDemo():
     xtrain,ytrain,xtest,ytest = getTrainingTestData()
+    fig, axes = plt.subplots(3,2)
+    
     
     #run exact inference on training data.
     exact_model = getRegressionModel(xtrain,ytrain)
-        
-    exact_model.optimize(max_iters = 2000000 )
+    exact_model.optimize(max_iters = 2000000, tol=tol )
    
     #run sparse model on training data intialized from exact optimal solution.
     VFEmodel = trainSparseModel(xtrain,ytrain,exact_model,False)
     FITCmodel = trainSparseModel(xtrain,ytrain,exact_model,True)
+    VFEmodelAdverserial = trainVFEwithFITC(xtrain,ytrain,FITCmodel)
 
     print "Exact model parameters \n"
     printModelParameters( exact_model )
@@ -109,10 +147,27 @@ def snelsonDemo():
     printModelParameters( VFEmodel )
     print "Sparse model parameters for FITC optimization \n"
     printModelParameters( FITCmodel )
+    print "Sparse model parameters for VFE adverserial optimization \n"
+    printModelParameters( VFEmodelAdverserial )
     
-    plotComparisonFigure( xtrain, FITCmodel, exact_model, 1, 2, "FITC" )
-    plotComparisonFigure( xtrain, VFEmodel, exact_model, 3, 4, "VFE" )
-    plt.show()
+    plotComparisonFigure( xtrain, FITCmodel, exact_model, axes[0,0], axes[0,1], "FITC" )
+    plotComparisonFigure( xtrain, VFEmodel, exact_model, axes[1,0], axes[1,1], "VFE" )
+    plotComparisonFigure( xtrain, VFEmodelAdverserial, exact_model, axes[2,0], axes[2,1], "VFE adverserial ", True ) 
+
+    axes[0,0].set_ylabel('FITC')
+    axes[1,0].set_ylabel('VFE')
+    axes[2,0].set_ylabel('VFE adverserial')
+    
+    fig, axes = plt.subplots(1,1)
+    inds = np.argsort( xtrain.flatten() )
+    axes.plot( xtrain[inds,:], ytrain[inds,:], 'ro' )
+    plotPredictions( axes, exact_model, 'g', None )
+    
+
+
+    
+    embed()
+    #plt.show()
     
 if __name__ == '__main__':
     snelsonDemo()
