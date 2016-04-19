@@ -9,7 +9,7 @@ from matplotlib2tikz import save as save_tikz
 from IPython import embed
 
 tol=1e-11
-nRepeats = 1
+nRepeats = 50
 
 predict_limits = [-4.,4]
 inducing_points_limits = [-1.,9]
