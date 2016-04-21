@@ -462,3 +462,41 @@ class ParamList(Parameterized):
         to set their values by assignment.
         """
         self.sorted_params[key]._array[...] = value
+
+
+
+def make_parameterized_names(parameterized_list):
+    """
+    Take a list of kernels and return a list of strings, giving each kernel a
+    unique name.
+    Each name is made from the lower-case version of the kernel's class name.
+    Duplicate kernels are given training numbers.
+    """
+    names = []
+    counting_dict ={}
+    for p in parameterized_list:
+        raw_name = p.__class__.__name__.lower()
+
+        #check for duplicates: start numbering if needed
+        if raw_name in counting_dict:
+            if counting_dict[raw_name] == 1:
+                names[names.index(raw_name)] = raw_name + '_1'
+            counting_dict[raw_name] += 1
+            name = raw_name + '_' + str(counting_dict[raw_name])
+        else:
+            counting_dict[raw_name] = 1
+            name = raw_name
+        names.append(name)
+    return names
+
+
+class ParameterizedList(Parameterized):
+
+    def __init__(self, parameterized_list):
+        Parameterized.__init__(self)
+        self.parameterized_list = parameterized_list
+        self.names = make_parameterized_names(parameterized_list)
+        [setattr(self, name, k) for name, k in zip(self.names, self.parameterized_list)]
+
+    def __getitem__(self, key):
+        return self.parameterized_list[key]
