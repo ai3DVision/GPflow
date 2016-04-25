@@ -146,7 +146,8 @@ class SVGP_additive(GPModel):
 
 class SVGP_additive2(Model):
 
-    def __init__(self, X, Y, kerns, likelihood, Z, mean_function=None, num_latent=None, q_diag=False, whiten=True):
+    def __init__(self, X, Y, kerns, likelihood, Z, mean_function=None, num_latent=None, q_diag=False, whiten=True,
+                 f_indices=None):
         # kern, Z, mean_function are all lists of univariate GP counterparts for each dimension
         # after has finished, num_inducing, qu_mu, q_sqrt are also lists
 
@@ -160,6 +161,16 @@ class SVGP_additive2(Model):
 
         self.X, self.Y, self.likelihood, self.mean_function = X, Y, likelihood, mean_function
         self.kerns = ParameterizedList(kerns)
+
+        # c : indice when iterating over factors (imagine clique)
+        # d : indice when iterating over dimensions
+
+        if f_indices == None:
+            f_indices = [[c] for c in range(len(Z))]
+
+        self.f_indices = f_indices
+        self.f_sizes = [len(f) for f in f_indices]
+        self.n_f = len(Z)
 
         Model.__init__(self, "SVGP_Additive")
 
@@ -180,28 +191,28 @@ class SVGP_additive2(Model):
     def build_prior_KL(self):
         KL = None
 
-        for d in xrange(self.X.shape[1]):
-            q_mu_d = self.q_mu[d]
-            q_sqrt_d = self.q_sqrt[d]
-            Z_d = self.Z[d]
+        for c in xrange(self.n_f): #X.shape[1]):
+            q_mu_c = self.q_mu[c]
+            q_sqrt_c = self.q_sqrt[c]
+            Z_c = self.Z[c]
 
             if self.whiten:
                 if self.q_diag:
-                    KL_d = kullback_leiblers.gauss_kl_white_diag(q_mu_d, q_sqrt_d, self.num_latent)
+                    KL_c = kullback_leiblers.gauss_kl_white_diag(q_mu_c, q_sqrt_c, self.num_latent)
                 else:
-                    KL_d = kullback_leiblers.gauss_kl_white(q_mu_d, q_sqrt_d, self.num_latent)
+                    KL_c = kullback_leiblers.gauss_kl_white(q_mu_c, q_sqrt_c, self.num_latent)
             else:
-                K = self.kerns[d].K(Z_d) + eye(self.num_inducing[d]) * 1e-6
+                K = self.kerns[c].K(Z_c) + eye(self.num_inducing[c]) * 1e-6
                 if self.q_diag:
-                    KL_d = kullback_leiblers.gauss_kl_diag(q_mu_d, q_sqrt_d, K, self.num_latent)
+                    KL_c = kullback_leiblers.gauss_kl_diag(q_mu_c, q_sqrt_c, K, self.num_latent)
                 else:
-                    KL_d = kullback_leiblers.gauss_kl(q_mu_d, q_sqrt_d, K, self.num_latent)
+                    KL_c = kullback_leiblers.gauss_kl(q_mu_c, q_sqrt_c, K, self.num_latent)
 
             # add things up, we were too lazy to check the type of KL_d
             if KL is None:
-                KL = KL_d
+                KL = KL_c
             else:
-                KL += KL_d
+                KL += KL_c
 
         return KL
 
@@ -216,64 +227,72 @@ class SVGP_additive2(Model):
 
         fmean = None
         fvar = None
-        for d in xrange(self.X.shape[1]):
+        for c in xrange(self.n_f): #xrange(self.X.shape[1]):
 
-            x_d_as_2d = self.X[:, d].reshape(len(self.X), 1)
-            q_mu_d = self.q_mu[d]
-            q_sqrt_d = self.q_sqrt[d]
-            Z_d = self.Z[d]
+            start = self.f_indices[c][0]
+            end = self.f_indices[c][-1]+1
+
+            #x_c_as_2d = self.X[:, self.f_indices[c]].reshape(len(self.X), self.f_sizes[c])
+            x_c_as_2d = self.X[:, start:end]
+            q_mu_c = self.q_mu[c]
+            q_sqrt_c = self.q_sqrt[c]
+            Z_c = self.Z[c]
 
             # Get conditionals
             if self.whiten:
-                fmean_d, fvar_d = conditionals.gaussian_gp_predict_whitened(x_d_as_2d, Z_d, self.kerns[d], q_mu_d, q_sqrt_d, self.num_latent)
+                fmean_c, fvar_c = conditionals.gaussian_gp_predict_whitened(x_c_as_2d, Z_c, self.kerns[c], q_mu_c, q_sqrt_c, self.num_latent)
             else:
-                fmean_d, fvar_d = conditionals.gaussian_gp_predict(x_d_as_2d, Z_d, self.kerns[d], q_mu_d, q_sqrt_d, self.num_latent)
+                fmean_c, fvar_c = conditionals.gaussian_gp_predict(x_c_as_2d, Z_c, self.kerns[c], q_mu_c, q_sqrt_c, self.num_latent)
 
             # add in mean function to conditionals.
-            fmean_d += self.mean_function[d](x_d_as_2d)
+            fmean_c += self.mean_function[c](x_c_as_2d)
 
             # add things up, we were too lazy to check the type of fmean_d, fvar_d
             if fmean is None or fvar is None:
-                fmean = fmean_d
-                fvar = fvar_d
+                fmean = fmean_c
+                fvar = fvar_c
             else:
-                fmean += fmean_d
-                fvar += fvar_d
+                fmean += fmean_c
+                fvar += fvar_c
 
         # Get variational expectations.
         variational_expectations = self.likelihood.variational_expectations(fmean, fvar, self.Y)
 
         return tf.reduce_sum(variational_expectations) - KL
 
-    def build_predict_single(self, Xnew, d):
+    def build_predict_single(self, Xnew, c):
+        # prediction over single function
 
-        xnew_d_as_2d = tf.expand_dims(Xnew[:, d],1)
-        q_mu_d = self.q_mu[d]
-        q_sqrt_d = self.q_sqrt[d]
-        Z_d = self.Z[d]
+        start = self.f_indices[c][0]
+        end = self.f_indices[c][-1]+1
+
+        xnew_c_as_2d = Xnew[:, start:end]
+
+        q_mu_c = self.q_mu[c]
+        q_sqrt_c = self.q_sqrt[c]
+        Z_c = self.Z[c]
 
         if self.whiten:
-            mu_d, var_d = conditionals.gaussian_gp_predict_whitened(xnew_d_as_2d, Z_d, self.kerns[d], q_mu_d, q_sqrt_d, self.num_latent)
+            mu_c, var_c = conditionals.gaussian_gp_predict_whitened(xnew_c_as_2d, Z_c, self.kerns[c], q_mu_c, q_sqrt_c, self.num_latent)
         else:
-            mu_d, var_d = conditionals.gaussian_gp_predict(xnew_d_as_2d, Z_d, self.kerns[d], q_mu_d, q_sqrt_d, self.num_latent)
-        mu_d += self.mean_function[d](xnew_d_as_2d)
-        return mu_d, var_d
+            mu_c, var_c = conditionals.gaussian_gp_predict(xnew_c_as_2d, Z_c, self.kerns[c], q_mu_c, q_sqrt_c, self.num_latent)
+        mu_c += self.mean_function[c](xnew_c_as_2d)
+        return mu_c, var_c
 
     def build_predict(self, Xnew):
         mu = None
         var = None
 
-        for d in self.prediction_ds:
-
-            mu_d, var_d = self.build_predict_single( Xnew, d)
+        for c in self.prediction_ds:
+            mu_c, var_c = self.build_predict_single( Xnew, c)
 
             # add things up, we were too lazy to check the type of fmean_d, fvar_d
             if mu is None or var is None:
-                mu = mu_d
-                var = var_d
+                mu = mu_c
+                var = var_c
             else:
-                mu += mu_d
-                var += var_d
+                mu += mu_c
+                var += var_c
 
         return mu, var
 
